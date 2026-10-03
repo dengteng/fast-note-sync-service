@@ -10,6 +10,7 @@ import (
 	"strings"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,6 +59,7 @@ type FileUploadBinaryChunkSession struct {
 	FileHandle     *os.File            // File handle // 文件句柄
 	mu             sync.Mutex          // Mutex to protect concurrent operations // 互斥锁，保护并发操作
 	CreatedAt      time.Time           // Created time // 创建时间
+	lastActive     atomic.Int64        // Unix nanos of creation or last received chunk // 创建或最近收到分片的时间
 	CancelFunc     context.CancelFunc  // Cancel function for timeout control // 取消函数，用于超时控制
 	uploadedChunks map[uint32]struct{} // Record of uploaded chunk indices for idempotency // 已上传分块索引记录，用于幂等
 	isCompleted    bool                // Whether upload is completely finished // 上传是否已彻底完成
@@ -108,8 +110,13 @@ func (s *FileUploadBinaryChunkSession) GetPathHash() string {
 	return s.PathHash
 }
 
-func (s *FileUploadBinaryChunkSession) GetCreatedAt() time.Time {
-	return s.CreatedAt
+// GetLastActiveAt returns when the session was created or last received a chunk.
+// Stale cleanup must use this, not CreatedAt: a slow uplink keeps a 60MB upload alive well past
+// 10 minutes, and any other connection of the same user closing would otherwise kill it mid-flight.
+// GetLastActiveAt 返回会话创建或最近收到分片的时间。过期清理必须看它而不是 CreatedAt：
+// 慢上行传 60MB 远超 10 分钟，同一用户任一连接断开都会把正在传的会话误删。
+func (s *FileUploadBinaryChunkSession) GetLastActiveAt() time.Time {
+	return time.Unix(0, s.lastActive.Load())
 }
 
 // FileDownloadChunkSession defines the session state for file chunk download
@@ -263,6 +270,7 @@ func (h *FileWSHandler) FileUploadChunkBinary(c *pkgapp.WebsocketClient, data []
 		}))
 		return
 	}
+	session.lastActive.Store(time.Now().UnixNano())
 
 	session.mu.Lock()
 	// 1. Check if completely finished (Idempotency for late chunks)
@@ -1193,6 +1201,7 @@ func (h *FileWSHandler) handleFileUploadSessionCreate(c *pkgapp.WebsocketClient,
 					zap.String("path", path),
 				)
 				session.Context = context
+				session.lastActive.Store(time.Now().UnixNano())
 				return session, nil
 			}
 		}
@@ -1260,6 +1269,7 @@ func (h *FileWSHandler) handleFileUploadSessionCreate(c *pkgapp.WebsocketClient,
 		uploadedChunks: make(map[uint32]struct{}),
 		Context:        context,
 	}
+	session.lastActive.Store(session.CreatedAt.UnixNano())
 	// Adjust chunk size based on file size
 	// 根据文件大小调整分块大小
 	session.TotalChunks = util.Ceil(session.Size, session.ChunkSize)

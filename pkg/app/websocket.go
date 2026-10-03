@@ -249,10 +249,10 @@ type PathHashGetter interface {
 	GetPathHash() string
 }
 
-// SessionCreatedAtGetter interface for sessions that track creation time
-// SessionCreatedAtGetter 接口，用于获取会话创建时间
-type SessionCreatedAtGetter interface {
-	GetCreatedAt() time.Time
+// SessionLastActiveGetter interface for sessions that track last activity time
+// SessionLastActiveGetter 接口，用于获取会话最近活动时间
+type SessionLastActiveGetter interface {
+	GetLastActiveAt() time.Time
 }
 
 // DiffMergeEntry represents an entry in DiffMergePaths
@@ -1665,8 +1665,8 @@ func (w *WebsocketServer) OnClose(conn *gws.Conn, err error) {
 
 	// No longer clean up BinaryChunkSessions in OnClose, rely on the timeout mechanism for automatic cleanup instead
 	// 不再在 OnClose 中清理 BinaryChunkSessions，改为依赖超时机制自动清理
-	// However, clean up stale sessions (older than 10 minutes) to prevent memory leaks from zombie connections.
-	// 但是清理超过 10 分钟的过期会话，防止僵尸连接导致内存泄漏。
+	// However, clean up stale sessions (idle for more than 10 minutes) to prevent memory leaks from zombie connections.
+	// 但是清理闲置超过 10 分钟的过期会话，防止僵尸连接导致内存泄漏。
 	// Recent sessions are kept to support reconnection during network fluctuations.
 	// 保留近期会话以支持网络波动期间的重连。
 	if c.User != nil {
@@ -1913,9 +1913,9 @@ func (w *WebsocketServer) BroadcastToUser(uid int64, code *code.Code, action str
 	}
 }
 
-// cleanupStaleSessions removes BinaryChunkSessions older than maxAge for a given user.
+// cleanupStaleSessions removes BinaryChunkSessions idle longer than maxAge for a given user.
 // This prevents memory leaks from zombie connections whose timeout goroutines never fired.
-// cleanupStaleSessions 清理指定用户超过 maxAge 的 BinaryChunkSessions。
+// cleanupStaleSessions 清理指定用户闲置超过 maxAge 的 BinaryChunkSessions（按最近活动时间，不按创建时间）。
 // 防止僵尸连接的超时 goroutine 未触发时导致的内存泄漏。
 func (w *WebsocketServer) cleanupStaleSessions(uid string, maxAge time.Duration) {
 	w.sessionsMu.Lock()
@@ -1928,8 +1928,8 @@ func (w *WebsocketServer) cleanupStaleSessions(uid string, maxAge time.Duration)
 
 	var staleIDs []string
 	for sessionID, session := range userSessions {
-		if getter, ok := session.(SessionCreatedAtGetter); ok {
-			if time.Since(getter.GetCreatedAt()) > maxAge {
+		if getter, ok := session.(SessionLastActiveGetter); ok {
+			if time.Since(getter.GetLastActiveAt()) > maxAge {
 				staleIDs = append(staleIDs, sessionID)
 			}
 		}
